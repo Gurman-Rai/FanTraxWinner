@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Fantrax credentials and private diagnostic responses
+environment/*
+!environment/.env.example
+.env.*
+!.env.example
+data/

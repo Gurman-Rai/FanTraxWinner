@@ -1,0 +1,1 @@
+"""FanTraxWinner application modules."""
