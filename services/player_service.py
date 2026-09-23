@@ -1,5 +1,45 @@
 """Player identity, free-agent and ADP parsing helpers."""
 
+import unicodedata
+
+
+PLAYER_NAME_ALIASES = {
+    'nicolas claxton': 'nic claxton',
+}
+
+NBA_STAT_KEYS = ('pts', 'reb', 'ast', 'stl', 'blk', 'fg3m', 'fg_pct', 'ft_pct', 'tov')
+
+
+def map_players_to_stats(players, player_stats_map):
+    """Copy rows and attach averages without replacing current team information."""
+    results = []
+    for player in players:
+        stats = player_stats_map.get(normalize_player_name(player['playerName']), {})
+        results.append({**player, **{key: stats.get(key) for key in NBA_STAT_KEYS}})
+    return results
+
+
+def get_available_player_rows(available_players):
+    """Resolve available players once, preserving the existing ADP order."""
+    rows = []
+    for player in available_players:
+        player_id, name, positions, adp = get_available_player_details(player)
+        rows.append({'playerId': player_id, 'playerName': name, 'positions': positions,
+                     'adp': adp, 'status': player['leagueInfo'].get('status')})
+    return rows
+
+
+def normalize_player_name(name: str) -> str:
+    """Use the same name key for NBA and Fantrax, preserving display names."""
+    if ',' in name:
+        last_name, first_name = name.split(',', 1)
+        name = f'{first_name.strip()} {last_name.strip()}'
+    name = unicodedata.normalize('NFKD', name)
+    name = ''.join(char for char in name if not unicodedata.combining(char))
+    name = ' '.join(name.lower().strip().split())
+    return PLAYER_NAME_ALIASES.get(name, name)
+
+
 def get_free_agents(league_data):
     """Get all players whose Fantrax status is FA."""
     player_info = league_data.get('playerInfo', {})

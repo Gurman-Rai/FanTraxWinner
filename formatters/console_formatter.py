@@ -1,6 +1,6 @@
 from services.matchup_service import iter_category_scores
 from services.roster_service import extract_roster_players, get_roster_rows
-from services.player_service import get_available_player_details
+from services.player_service import NBA_STAT_KEYS, get_available_player_details
 
 
 def print_progress(message):
@@ -108,6 +108,40 @@ def print_team_roster(team_name, team_id, rosters_data, league_data, adp_lookup)
     print('-' * 95)
 
 
+def print_weekly_matchup(season, week_number, my_name, opponent_name,
+                         my_players, opponent_players, games_by_team, player_team_map):
+    """Show scheduled player-games and visible name-match failures."""
+    print('\n' + '=' * 65)
+    print(f'FANTASY MATCHUP - NBA WEEK {week_number} ({season})')
+    print('=' * 65)
+    if not games_by_team:
+        print('Warning: no NBA schedule games returned for the selected season/week.')
+    if not player_team_map:
+        print('Warning: no NBA players mapped to teams for the selected season.')
+    unmatched = []
+    for name, players in ((my_name, my_players), (opponent_name, opponent_players)):
+        print(f'\n{name}')
+        print('-' * 65)
+        print(f"{'PLAYER':<32}{'NBA TEAM':<15}{'GAMES':>6}")
+        print('-' * 65)
+        if not players:
+            print(f'No roster players found for {name}.')
+        for player in players:
+            print(f"{player['playerName']:<32}{player['nba_team'] or 'UNKNOWN':<15}"
+                  f"{player['games_this_week']:>6}")
+            if player['nba_team'] is None:
+                unmatched.append(player['playerName'])
+        print(f"\nTotal Player Games: {sum(p['games_this_week'] for p in players)}")
+    for name in unmatched:
+        print(f'Warning: NBA team not found for player: {name}')
+    # Keep the diagnostic summary together so it is easy to remove later.
+    print(f'\nNBA teams with schedule data: {len(games_by_team)}')
+    print(f'NBA normalized player names mapped to teams: {len(player_team_map)}')
+    print(f'My roster players: {len(my_players)}')
+    print(f'Opponent roster players: {len(opponent_players)}')
+    print(f'Unmatched players: {len(unmatched)}')
+
+
 def print_available_players(available_players):
     """Print the same top 25 free agents."""
     print('\n')
@@ -124,6 +158,47 @@ def print_available_players(available_players):
             adp_display = f'{adp:.1f}'
         print(f'{index:<4}{player_name:<32}{positions:<22}{adp_display:<12}{player_id:<18}')
     print('-' * 88)
+
+
+def print_player_stats(title, players, season):
+    """Display unscaled season averages alongside current teams and weekly games."""
+    print('\n' + '=' * 115)
+    print(f'{title} - {season} REGULAR SEASON AVERAGES (PER GAME)')
+    print('-' * 115)
+    labels = ('PTS', 'REB', 'AST', 'STL', 'BLK', '3PM', 'FG%', 'FT%', 'TO')
+    print(f"{'PLAYER':<32}{'TEAM':<8}{'GAMES':>6}" + ''.join(f'{label:>7}' for label in labels))
+    print('-' * 115)
+    for player in players:
+        values = []
+        for key in NBA_STAT_KEYS:
+            value = player.get(key)
+            values.append('N/A' if value is None else
+                          f'{value:.3f}' if key in ('fg_pct', 'ft_pct') else f'{value:.1f}')
+        print(f"{player['playerName']:<32}{player['nba_team'] or 'UNKNOWN':<8}"
+              f"{player['games_this_week']:>6}" + ''.join(f'{value:>7}' for value in values))
+    if not players:
+        print('No players found.')
+
+
+def print_stats_summary(rows_fetched, rosters, available_players):
+    """Keep all missing-stat warnings and temporary diagnostics together."""
+    players = [player for group in [*rosters, available_players] for player in group]
+    missing = [player for player in players if all(player[key] is None for key in NBA_STAT_KEYS)]
+    unnamed = 0
+    for player in missing:
+        if player['playerName'] == 'Unknown':
+            unnamed += 1
+            continue
+        print(f"Warning: NBA stats not found for player: {player['playerName']}")
+    if unnamed:
+        print(f'Warning: NBA stats unavailable for {unnamed} players whose Fantrax name '
+              'could not be resolved (Unknown). Rows retained with N/A stats.')
+    print(f'\nNBA stats rows fetched: {rows_fetched}')
+    print(f'My roster players: {len(rosters[0]) if rosters else 0}')
+    print(f'Opponent roster players: {len(rosters[1]) if rosters else 0}')
+    print(f'Waiver players processed: {len(available_players)}')
+    print(f'Players with stats: {len(players) - len(missing)}')
+    print(f'Players without stats: {len(missing)}')
 
 
 def print_adp_sample(adp_players):

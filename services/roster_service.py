@@ -1,5 +1,6 @@
 from services.player_service import (get_league_player_info, get_player_name,
-                                     get_player_positions, get_player_adp)
+                                     get_player_positions, get_player_adp,
+                                     normalize_player_name)
 
 def find_team_roster(rosters_data, team_id):
     """Find a fantasy team's roster."""
@@ -80,6 +81,17 @@ def get_roster_status(roster_player):
     if isinstance(status, dict):
         return status.get('name') or status.get('shortName') or status.get('status') or 'N/A'
     return status or 'N/A'
+
+
+def map_players_to_weekly_games(players, player_team_map, games_by_team):
+    """Enrich resolved roster rows without mutating Fantrax data."""
+    results = []
+    for player in players:
+        normalized_name = normalize_player_name(player['playerName'])
+        nba_team = player_team_map.get(normalized_name)
+        results.append({**player, 'nba_team': nba_team,
+                        'games_this_week': games_by_team.get(nba_team, 0)})
+    return results
 
 
 def get_roster_rows(roster_players, league_data, adp_lookup):
