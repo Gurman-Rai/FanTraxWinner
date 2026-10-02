@@ -16,6 +16,23 @@ Edit `config.py` to change `LEAGUE_ID`, `MY_TEAM_ID`, `NBA_SEASON`, `NBA_WEEK`,
 overrides the displayed Fantrax scoring-period date when it is not `None`.
 Manual dates do not select the NBA week.
 
+## DSS streaming outlook
+
+When a current matchup is available, the app also compares deterministic add/drop
+moves across relevant calendar dates. It uses the already-fetched NBA `ScheduleLeagueV2`
+dataset to attach each roster and available player’s unstarted regular-season game dates
+from today through the actual Fantrax scoring-period end. Manual display-date overrides
+do not change the DSS period. For each move date, only add/drop games on or after that
+date affect remaining production; a move is assumed effective for games on the same
+calendar date. The report shows the selected move date, usable add games, lost drop games,
+net games, and category effects. It remains a deterministic projection, not a probability
+forecast or an automatic transaction system.
+
+Schedule eligibility uses calendar dates, not tipoff times. The DSS does not model
+lineup slots, daily start limits or game congestion, roster legality, injury availability,
+waiver-processing delays, or lineup lock times. It assumes every scheduled player
+appearance can contribute. The live matchup and NBA endpoints are separate snapshots.
+
 Dates must be quoted: `"2026-01-05"`. Writing `2026-01-05` evaluates subtraction
 and produces a number. Invalid manual dates now fail before any network calls.
 For historical testing, set `NBA_SEASON = "2025-26"` and use, for example,
@@ -30,7 +47,20 @@ are excluded from the map. The NBA endpoint still returns the full dataset;
 this limits stored mappings, not network traffic. No per-player requests are made.
 Requests use a 5-second connection timeout and a 10-second read timeout.
 The existing date-based `get_nba_games_by_team(start_date, end_date)` helper
-remains available, but the normal run now uses scheduled games instead.
+also uses `ScheduleLeagueV2`, with inclusive calendar dates. Both methods exclude
+preseason games, count each game ID once, and raise a clear error for an empty
+selection rather than treating a missing schedule as zero games for every team.
+The normal run continues to select games by `NBA_WEEK`.
+
+Rerun the isolated live source comparison (network access required):
+
+```powershell
+.\.venv\Scripts\python.exe tests/test_nba_schedule_sources.py
+```
+
+It checks the 2026-10-20 through 2026-10-25 window against the installed schedule,
+scoreboard, CDN, and historical endpoints, prints fixtures and team counts, and
+exits nonzero if no source validates future games. It is not run by pytest.
 
 `nba_api==1.11.4` remains unchanged; this feature adds no dependencies.
 

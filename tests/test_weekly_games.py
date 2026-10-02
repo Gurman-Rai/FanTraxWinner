@@ -7,6 +7,7 @@ import requests
 import app
 from clients import nba_client
 from services.roster_service import map_players_to_weekly_games
+from services.schedule_service import get_remaining_game_dates_by_team
 
 
 def mock_endpoint(monkeypatch, module, name, rows):
@@ -18,13 +19,76 @@ def mock_endpoint(monkeypatch, module, name, rows):
 
 def test_schedule_counts_both_sides_only_selected_week(monkeypatch):
     endpoint = mock_endpoint(monkeypatch, nba_client.scheduleleaguev2, 'ScheduleLeagueV2', [
-        {'weekNumber': 1, 'homeTeam_teamTricode': 'PHI', 'awayTeam_teamTricode': 'BOS'},
-        {'weekNumber': 1, 'homeTeam_teamTricode': 'DEN', 'awayTeam_teamTricode': 'PHI'},
-        {'weekNumber': 2, 'homeTeam_teamTricode': 'DEN', 'awayTeam_teamTricode': 'BOS'},
+        schedule_game('0022600001', '10/20/2026 00:00:00', 'PHI', 'BOS'),
+        schedule_game('0022600002', '10/25/2026 00:00:00', 'DEN', 'PHI'),
+        schedule_game('0022600003', '10/26/2026 00:00:00', 'DEN', 'BOS', week=2),
     ])
     assert nba_client.NBAClient().get_weekly_games_by_team(1) == {'PHI': 2, 'BOS': 1, 'DEN': 1}
     endpoint.assert_called_once_with(season=nba_client.NBA_SEASON, timeout=(5, 10))
-    assert nba_client.NBAClient().get_weekly_games_by_team(99) == {}
+    with pytest.raises(ValueError, match='returned no games'):
+        nba_client.NBAClient().get_weekly_games_by_team(99)
+
+
+def schedule_game(game_id, game_date, home='PHI', away='BOS', week=1):
+    return {'gameId': game_id, 'gameDate': game_date, 'weekNumber': week,
+            'seasonYear': nba_client.NBA_SEASON, 'gameStatus': 1,
+            'homeTeam_teamTricode': home, 'awayTeam_teamTricode': away}
+
+
+def test_future_dates_inclusive_deduplicated_and_regular_season_only(monkeypatch):
+    opening = schedule_game('0022600001', '10/20/2026 00:00:00')
+    mock_endpoint(monkeypatch, nba_client.scheduleleaguev2, 'ScheduleLeagueV2', [
+        opening, opening.copy(),
+        schedule_game('0022600002', '2026-10-25T23:30:00-04:00', 'DEN', 'PHI'),
+        schedule_game('0012600003', '10/20/2026 00:00:00'),  # preseason
+        schedule_game('0022600004', '10/19/2026 00:00:00'),
+        schedule_game('0022600005', '10/26/2026 00:00:00'),
+    ])
+    client = nba_client.NBAClient()
+    assert client.get_nba_games_by_team('2026-10-20', '2026-10-25') == {
+        'PHI': 2, 'BOS': 1, 'DEN': 1}
+    with pytest.raises(ValueError, match='returned no games'):
+        client.get_nba_games_by_team('2027-07-01', '2027-07-02')
+
+
+def test_remaining_game_dates_by_team_filters_status_dates_and_duplicate_ids():
+    games = pd.DataFrame([
+        schedule_game('0022600001', '2026-10-22', 'PHI', 'BOS'),
+        schedule_game('0022600001', '2026-10-22', 'PHI', 'BOS'),
+        schedule_game('0022600002', '2026-10-23', 'PHI', 'DEN'),
+        {**schedule_game('0022600003', '2026-10-24', 'PHI', 'BOS'), 'gameStatus': 2},
+        schedule_game('0012600004', '2026-10-24', 'PHI', 'BOS'),
+        schedule_game('0022600005', '2026-10-25', 'DEN', 'BOS'),
+    ])
+    dates = get_remaining_game_dates_by_team(games, '2026-10-23', '2026-10-25')
+    assert dates == {'PHI': ['2026-10-23'], 'DEN': ['2026-10-23', '2026-10-25'],
+                     'BOS': ['2026-10-25']}
+
+
+@pytest.mark.parametrize('changes', [
+    {'gameDate': 'invalid'}, {'seasonYear': '2025-26'},
+    {'homeTeam_teamTricode': 'XXX'}, {'awayTeam_teamTricode': None},
+])
+def test_invalid_schedule_fails_clearly(monkeypatch, changes):
+    row = {**schedule_game('0022600001', '10/20/2026 00:00:00'), **changes}
+    mock_endpoint(monkeypatch, nba_client.scheduleleaguev2, 'ScheduleLeagueV2', [row])
+    with pytest.raises(ValueError, match='NBA ScheduleLeagueV2'):
+        nba_client.NBAClient().get_weekly_games_by_team(1)
+
+
+def test_date_validation_precedes_network(monkeypatch):
+    endpoint = mock_endpoint(monkeypatch, nba_client.scheduleleaguev2, 'ScheduleLeagueV2', [])
+    with pytest.raises(ValueError, match='on or before'):
+        nba_client.NBAClient().get_nba_games_by_team('2026-10-25', '2026-10-20')
+    endpoint.assert_not_called()
+
+
+def test_app_forwards_future_date_range():
+    nba = Mock()
+    nba.get_nba_games_by_team.return_value = {'BOS': 2}
+    report = app.FantraxApp(nba_client=nba)
+    assert report.get_nba_games_by_team('2099-10-20', '2099-10-25') == {'BOS': 2}
+    nba.get_nba_games_by_team.assert_called_once_with('2099-10-20', '2099-10-25')
 
 
 def test_player_map_skips_missing_teams(monkeypatch):

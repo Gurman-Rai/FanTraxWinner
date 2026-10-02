@@ -1,13 +1,15 @@
-from nba_api.stats.endpoints import commonallplayers, leaguegamelog, scheduleleaguev2, leaguedashplayerstats
+from nba_api.stats.endpoints import commonallplayers, scheduleleaguev2, leaguedashplayerstats
+from nba_api.stats.static import teams
 import pandas as pd
 import requests
 
 from config import NBA_SEASON
 from services.player_service import NBA_STAT_KEYS, normalize_player_name
+from services.schedule_service import parse_date
 
 
 class NBAClient:
-    """Retrieve NBA schedules, player teams, and historical game logs."""
+    """Retrieve NBA schedules, player teams, and player statistics."""
 
     def get_player_stats_map(self, season: str, player_names=None) -> dict:
         """Fetch per-game regular-season averages once; optionally retain selected names."""
@@ -51,6 +53,13 @@ class NBAClient:
         """Count both teams in each scheduled game in the selected NBA week."""
         if type(week_number) is not int or week_number < 1:
             raise ValueError('NBA_WEEK must be a positive integer.')
+        games = self._get_schedule_dataframe()
+        # Reuse this run's response for DSS remaining-game calculations; no extra request.
+        self.schedule_games = games.copy()
+        return self._count_schedule_games(games[games['weekNumber'] == week_number])
+
+    def _get_schedule_dataframe(self):
+        """Fetch current regular-season schedules, including unplayed games."""
         try:
             schedule = scheduleleaguev2.ScheduleLeagueV2(
                 season=NBA_SEASON, timeout=(5, 10))
@@ -64,16 +73,35 @@ class NBAClient:
         if not frames:
             raise ValueError('NBA ScheduleLeagueV2 returned no schedule dataset.')
         games = frames[0]
-        columns = ['homeTeam_teamTricode', 'awayTeam_teamTricode']
-        if not {'weekNumber', *columns}.issubset(games.columns):
+        columns = {'weekNumber', 'gameId', 'gameDate', 'seasonYear',
+                   'homeTeam_teamTricode', 'awayTeam_teamTricode'}
+        if not columns.issubset(games.columns):
             raise ValueError('NBA ScheduleLeagueV2 response is missing required schedule columns.')
-        week_games = games[games['weekNumber'] == week_number]
+        if games.empty or not games['seasonYear'].eq(NBA_SEASON).all():
+            raise ValueError(f'NBA ScheduleLeagueV2 returned no schedule for {NBA_SEASON}.')
+        # NBA game IDs beginning 002 identify regular-season games.
+        games = games[games['gameId'].astype(str).str.startswith('002')].copy()
+        games = games.drop_duplicates(subset='gameId')
+        games['weekNumber'] = pd.to_numeric(games['weekNumber'], errors='coerce')
+        # gameDate is the league calendar date, not the UTC tip-off timestamp.
+        games['gameDate'] = games['gameDate'].map(
+            lambda value: pd.to_datetime(value, errors='coerce').date())
+        if games['gameDate'].isna().any():
+            raise ValueError('NBA ScheduleLeagueV2 returned an invalid gameDate.')
+        return games
+
+    @staticmethod
+    def _count_schedule_games(games):
+        if games.empty:
+            raise ValueError('NBA schedule source returned no games for the requested week or date range.')
+        valid_teams = {team['abbreviation'] for team in teams.get_teams()}
         counts = {}
-        for column in columns:
-            for team in week_games[column].dropna():
-                if isinstance(team, str) and team.strip():
-                    team = team.strip().upper()
-                    counts[team] = counts.get(team, 0) + 1
+        for home, away in games[['homeTeam_teamTricode', 'awayTeam_teamTricode']].itertuples(
+                index=False, name=None):
+            if home not in valid_teams or away not in valid_teams or home == away:
+                raise ValueError('NBA ScheduleLeagueV2 returned an invalid team pairing.')
+            for team in (home, away):
+                counts[team] = counts.get(team, 0) + 1
         return counts
 
     def get_player_team_map(self, player_names=None) -> dict[str, str]:
@@ -112,38 +140,11 @@ class NBAClient:
         return mapping
 
     def get_nba_games_by_team(self, start_date, end_date) -> dict[str, int]:
-        """
-        Count NBA games for every team between
-        start_date and end_date.
-
-        Expected date format:
-        YYYY-MM-DD
-        """
-        try:
-            game_log = leaguegamelog.LeagueGameLog(
-                season=NBA_SEASON,
-                season_type_all_star='Regular Season',
-                date_from_nullable=start_date,
-                date_to_nullable=end_date,
-                player_or_team_abbreviation='T',
-                timeout=(5, 10),
-            )
-        except requests.RequestException as exc:
-            raise requests.RequestException(
-                f'NBA game-log request failed ({type(exc).__name__}). '
-                'Check your connection and try again; the NBA service may be unavailable. '
-                'The request uses a 5-second connection and 10-second read timeout.'
-            ) from None
-        data_frames = game_log.get_data_frames()
-        if not data_frames:
-            return {}
-        games_df = data_frames[0]
-        if games_df.empty:
-            return {}
-        if 'TEAM_ABBREVIATION' not in games_df.columns:
-            return {}
-        games_by_team = {}
-        for team_abbreviation in games_df['TEAM_ABBREVIATION'].dropna().unique():
-            team_games = games_df[games_df['TEAM_ABBREVIATION'] == team_abbreviation]
-            games_by_team[str(team_abbreviation)] = len(team_games)
-        return games_by_team
+        """Count scheduled games in an inclusive ISO date range, including future games."""
+        start = parse_date(start_date, 'Start date')
+        end = parse_date(end_date, 'End date')
+        if start > end:
+            raise ValueError('Start date must be on or before end date.')
+        games = self._get_schedule_dataframe()
+        return self._count_schedule_games(
+            games[(games['gameDate'] >= start) & (games['gameDate'] <= end)])

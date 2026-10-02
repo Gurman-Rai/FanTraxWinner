@@ -1,11 +1,13 @@
 """Coordinate data retrieval, parsing, and the existing console reports."""
 
+from datetime import date
+
 from config import LEAGUE_ID, MY_TEAM_ID, NBA_SEASON, NBA_WEEK, NBA_STATS_SEASON
-from datetime import datetime, timezone
 from clients.fantrax_client import FantraxClient
 from clients.nba_client import NBAClient
-from services import matchup_service, player_service, roster_service, schedule_service
+from services import matchup_service, player_service, roster_service, schedule_service, dss_service
 from formatters import console_formatter as console
+from formatters.dss_formatter import print_dss_report
 
 
 class FantraxApp:
@@ -43,15 +45,12 @@ class FantraxApp:
     print_team_roster = staticmethod(console.print_team_roster)
 
     def get_nba_games_by_team(self, start_date, end_date):
-        """Skip future played-game queries and otherwise retrieve game counts."""
+        """Retrieve scheduled games for an inclusive date range."""
         start = schedule_service.parse_date(start_date, 'Start date')
         end = schedule_service.parse_date(end_date, 'End date')
         if start > end:
             raise ValueError('Start date must be on or before end date.')
-        if start > datetime.now(timezone.utc).date():
-            console.print_future_game_logs()
-            return {}
-        console.print_schedule_loading()
+        console.print_progress('Loading NBA scheduled games...')
         return self.nba_client.get_nba_games_by_team(start_date, end_date)
 
     def run(self) -> None:
@@ -125,3 +124,34 @@ class FantraxApp:
         console.print_stats_summary(self.nba_client.stats_rows_fetched,
                                     weekly_rosters, available_rows)
         console.print_adp_sample(adp_players)
+        if my_matchup is not None:
+            self.print_dss(my_matchup, my_side, opponent_side, league_info, current_period,
+                           weekly_rosters, available_rows)
+
+    def print_dss(self, matchup, my_side, opponent_side, league_info, period, rosters, waivers):
+        """Adapt already-fetched data without changing the existing reporting inputs."""
+        try:
+            score = dss_service.normalize_current_score(matchup, my_side, opponent_side)
+            start, end = self.get_scoring_period_dates(league_info, period)
+            today = date.today()
+            period_start = schedule_service.parse_date(start, 'DSS period start')
+            schedule_start = max(today, period_start)
+            dates_by_team = schedule_service.get_remaining_game_dates_by_team(
+                getattr(self.nba_client, 'schedule_games', None), schedule_start, end)
+            groups = [[{**player,
+                        'remaining_game_dates': dates_by_team.get(player.get('nba_team'), []),
+                        'games_remaining': len(dates_by_team.get(player.get('nba_team'), []))}
+                       for player in players] for players in [*rosters, waivers]]
+            report = dss_service.build_dss_report(score, *groups, as_of=today, week_end=end)
+        except ValueError as exc:
+            console.print_progress(f'\nDSS unavailable: {exc}')
+            return
+        notes = [f'Actual Fantrax period {period}: {start} through {end}.',
+                 'Remaining games: unstarted games from today through period end, using calendar dates.',
+                 'Full boundary days are included; in-progress games are omitted. No intraday cutoffs.',
+                 'Manual display dates and NBA_WEEK do not replace the actual DSS matchup period.']
+        if any(not category.get(side) and
+               dss_service.number(matchup[side].get('gamesPlayed')) == 0
+               for category in matchup.get('categories', []) for side in (my_side, opponent_side)):
+            notes.append('Empty current category totals treated as zero only where Fantrax reports 0 games played.')
+        print_dss_report(report, notes)
